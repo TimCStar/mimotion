@@ -2,7 +2,7 @@ name: MiMotion
 
 on:
   schedule:
-    - cron: '17 10 * * *'
+    - cron: '17 1 * * *'
   workflow_dispatch:
     inputs:
       mode:
