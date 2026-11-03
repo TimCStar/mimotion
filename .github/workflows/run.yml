@@ -2,7 +2,11 @@ name: MiMotion
 
 on:
   schedule:
+    # 北京时间 09:17 为主触发，其余为备用（GitHub 定时任务偶尔漏跑；当天已成功则自动跳过）
     - cron: '17 1 * * *'
+    - cron: '47 2 * * *'
+    - cron: '17 4 * * *'
+    - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -17,6 +21,11 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: mimotion-run
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -31,8 +40,42 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Random delay for scheduled runs
+      - name: Skip if already succeeded today (Beijing time)
+        id: check
         if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, datetime
+          repo = os.environ["REPO"]; cur = int(os.environ["RUN_ID"])
+          bj = datetime.timezone(datetime.timedelta(hours=8))
+          start = datetime.datetime.now(bj).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc)
+          since = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path]))
+          runs = api(f"repos/{repo}/actions/workflows/run.yml/runs?created=>={since}&per_page=50&status=success")["workflow_runs"]
+          done = False
+          for r in runs:
+              if r["id"] == cur:
+                  continue
+              if r["event"] == "schedule":
+                  done = True
+              elif r["event"] == "workflow_dispatch":
+                  jobs = api(f"repos/{repo}/actions/runs/{r['id']}/jobs")["jobs"]
+                  for j in jobs:
+                      for st in j.get("steps", []):
+                          if st["name"] == "Persist encrypted tokens" and st["conclusion"] == "success":
+                              done = True
+              if done:
+                  print("already succeeded today via run", r["id"], r["event"]); break
+          open(os.environ["GITHUB_OUTPUT"], "a").write("skip=%s\n" % ("true" if done else "false"))
+          PY
+
+      - name: Random delay for scheduled runs
+        if: github.event_name == 'schedule' && steps.check.outputs.skip != 'true'
         run: |
           max_minutes="${{ vars.RANDOM_DELAY_MINUTES }}"
           if [ -z "$max_minutes" ]; then
@@ -47,6 +90,7 @@ jobs:
           fi
 
       - name: Install dependencies
+        if: steps.check.outputs.skip != 'true'
         run: pip3 install -r requirements.txt
 
       - name: Check config
@@ -69,7 +113,7 @@ jobs:
         run: python3 main.py --check-config
 
       - name: Run MiMotion
-        if: github.event_name == 'schedule' || inputs.mode != 'check_config'
+        if: steps.check.outputs.skip != 'true' && (github.event_name == 'schedule' || inputs.mode != 'check_config')
         env:
           CONFIG: ${{ secrets.CONFIG }}
           AES_KEY: ${{ secrets.AES_KEY }}
@@ -89,7 +133,7 @@ jobs:
         run: python3 main.py
 
       - name: Persist encrypted tokens
-        if: github.event_name == 'schedule' || inputs.mode == 'run'
+        if: steps.check.outputs.skip != 'true' && (github.event_name == 'schedule' || inputs.mode == 'run')
         run: |
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
